@@ -51,6 +51,11 @@ MainWindow::MainWindow(QWidget *parent)
 
     wireSignals();
     restoreSettings();
+
+    // A previously-saved "closed" state for the log dock (from an earlier
+    // session where it got closed) would otherwise keep restoring as
+    // hidden with no way to bring it back. Always start with it visible.
+    logDock->setVisible(true);
 }
 
 MainWindow::~MainWindow() = default;
