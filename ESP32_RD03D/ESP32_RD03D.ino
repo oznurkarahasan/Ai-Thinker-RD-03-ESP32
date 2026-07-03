@@ -1,7 +1,7 @@
 #include <ESP_RadarSensor.h>
 
 RadarSensor radar(16,17); // RX, TX pins (ESP32: RX=16, TX=17)
-bool DEBUG_RAW_TARGETS = false;  // Can be toggled via serial command
+bool DEBUG_RAW_TARGETS = true;  // Can be toggled via serial command
 bool MULTI_TARGET = true;       // Can be toggled via serial command
 bool EMA_ENABLED = true;        // Can be toggled via serial command
 
