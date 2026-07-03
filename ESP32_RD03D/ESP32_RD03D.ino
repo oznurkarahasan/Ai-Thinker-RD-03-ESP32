@@ -1,9 +1,12 @@
 #include <ESP_RadarSensor.h>
+#include <ArduinoJson.h>
 
 RadarSensor radar(16,17); // RX, TX pins (ESP32: RX=16, TX=17)
-bool DEBUG_RAW_TARGETS = true;  // Can be toggled via serial command
+bool DEBUG_RAW_TARGETS = false; // Verbose human-readable debug lines; OFF by default so the
+                                // USB serial stream is pure JSON for the Qt desktop app.
 bool MULTI_TARGET = true;       // Can be toggled via serial command
 bool EMA_ENABLED = true;        // Can be toggled via serial command
+uint32_t frame_seq = 0;         // Monotonic telemetry frame counter
 
 // ===== ZONE CONFIGURATION =====
 // Dynamic grid system with configurable tile size
@@ -159,9 +162,12 @@ void setup() {
   
   // Initialize dynamic zone system
   initializeZones();
-  
+
   // Initialize radar mode
   setRadarMode(MULTI_TARGET);
+
+  // Send zone/grid layout to any listening Qt client once at boot
+  sendConfigJSON();
   
   // Initialize tracking
   for (uint8_t i = 0; i < MAX_TRACKS; i++) {
@@ -401,6 +407,60 @@ void printZoneStatus() {
   Serial.println(active_count);
 }
 
+// ===== JSON TELEMETRY (Qt desktop client) =====
+// Two message types are sent as newline-delimited compact JSON on the USB serial line:
+//   {"type":"cfg", ...}  - grid/zone layout, sent once at boot and on-demand via the CFG command.
+//                          The Qt client caches this so per-frame packets never repeat zone names.
+//   {"type":"trk", ...}  - one message per loop iteration with live track + zone occupancy state.
+// Fixed-capacity StaticJsonDocument is used (no heap allocation) to keep this call cheap and
+// deterministic every loop iteration.
+
+uint16_t computeOccupancyMask() {
+  uint16_t mask = 0;
+  for (uint8_t i = 0; i < NUM_ZONES; i++) {
+    if (zone_occupied[i]) mask |= (uint16_t(1) << i);
+  }
+  return mask;
+}
+
+void sendConfigJSON() {
+  StaticJsonDocument<640> doc;
+  doc["type"] = "cfg";
+  doc["tile"] = TILE_SIZE;
+  doc["gw"] = GRID_WIDTH;
+  doc["gh"] = GRID_HEIGHT;
+  JsonArray zones = doc.createNestedArray("zones");
+  for (uint8_t i = 0; i < NUM_ZONES; i++) {
+    zones.add(ZONE_NAMES[i]);
+  }
+  serializeJson(doc, Serial);
+  Serial.print('\n');
+}
+
+void sendTelemetryJSON() {
+  StaticJsonDocument<384> doc;
+  doc["type"] = "trk";
+  doc["seq"] = frame_seq++;
+
+  JsonArray t = doc.createNestedArray("t");
+  for (uint8_t i = 0; i < MAX_TRACKS; i++) {
+    if (!tracks[i].active) continue;
+    JsonObject o = t.createNestedObject();
+    o["id"] = tracks[i].id;
+    // Positions are mm-scale; round to the nearest mm to keep the payload compact
+    // (sub-mm precision is meaningless given the sensor's own accuracy).
+    o["x"] = (int16_t)lroundf(tracks[i].x);
+    o["y"] = (int16_t)lroundf(tracks[i].y);
+    o["v"] = serialized(String(tracks[i].speed, 1));
+    o["z"] = tracks[i].current_zone; // index into cfg.zones[]; 255 = no zone
+  }
+
+  doc["zocc"] = computeOccupancyMask();
+
+  serializeJson(doc, Serial);
+  Serial.print('\n');
+}
+
 // Send command to RD-03D to set mode
 void setRadarMode(bool multi) {
 #if defined(ARDUINO_ARCH_ESP32)
@@ -479,12 +539,16 @@ void processSerialCommand() {
         }
       }
     }
+    else if (command == "CFG") {
+      sendConfigJSON();
+    }
     else if (command == "HELP") {
       Serial.println("\n=== COMMANDS ===");
       Serial.println("DEBUG - Toggle raw target debug output");
       Serial.println("MULTI - Toggle multi-target mode");
       Serial.println("EMA   - Toggle EMA smoothing");
       Serial.println("ZONES - Show zone definitions and current tracks");
+      Serial.println("CFG   - Resend JSON grid/zone config (for Qt client)");
       Serial.println("HELP  - Show this help");
     }
   }
@@ -715,14 +779,19 @@ void loop() {
     
     // Update zone occupancy
     updateZoneOccupancy();
-    
-    // Print status periodically
-    static unsigned long last_status = 0;
-    if (millis() - last_status > 2000) {
-      printZoneStatus();
-      last_status = millis();
+
+    // Print status periodically (human-readable; only when DEBUG_RAW_TARGETS is on)
+    if (DEBUG_RAW_TARGETS) {
+      static unsigned long last_status = 0;
+      if (millis() - last_status > 2000) {
+        printZoneStatus();
+        last_status = millis();
+      }
     }
-    
+
+    // One compact JSON telemetry frame per loop iteration for the Qt desktop client
+    sendTelemetryJSON();
+
     delay(50); // Faster update rate for tracking
   } else {
     // No radar data - increment lost frames for all tracks
@@ -735,8 +804,9 @@ void loop() {
         }
       }
     }
-    
+
     updateZoneOccupancy();
+    sendTelemetryJSON();
     delay(100);
   }
 }
