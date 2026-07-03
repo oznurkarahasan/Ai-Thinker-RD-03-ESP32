@@ -71,7 +71,9 @@ void ZoneGridItem::paint(QPainter *painter, const QStyleOptionGraphicsItem *, QW
     // grid) stay grayed-out with a faint fill so they read as inactive.
     static const QColor kExcludedFill(60, 62, 68, 70);
     static const QColor kExcludedBorder(110, 112, 118, 140);
-    static const QColor kEmptyBorder(180, 190, 205, 60);
+    // Bright cyan outline (matches the range-ring color) so unoccupied tiles read clearly over
+    // the arcs instead of blending into the dark background; thicker pen for the same reason.
+    static const QColor kEmptyBorder(0x00, 0xE5, 0xFF, 150);
     static const QColor kOccupiedFill(255, 60, 60, 85);
     static const QColor kOccupiedBorder(255, 110, 110, 220);
 
@@ -90,7 +92,7 @@ void ZoneGridItem::paint(QPainter *painter, const QStyleOptionGraphicsItem *, QW
             painter->setPen(QPen(kOccupiedBorder, 2));
             painter->setBrush(kOccupiedFill);
         } else {
-            painter->setPen(QPen(kEmptyBorder, 1));
+            painter->setPen(QPen(kEmptyBorder, 1.8));
             painter->setBrush(Qt::NoBrush);
         }
         painter->drawRect(z.rect);

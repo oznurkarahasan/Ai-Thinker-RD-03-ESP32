@@ -1,5 +1,6 @@
 #include "TargetItem.h"
 
+#include <QDateTime>
 #include <QPainter>
 #include <algorithm>
 
@@ -82,7 +83,6 @@ void TargetItem::updateSample(const QPointF &scenePos, float speedCmS, const QSt
     m_speedCmS = speedCmS;
     m_zoneLabel = zoneLabel;
     m_lastSeenMs = nowMs;
-    m_stale = false;
     pruneHistory(nowMs);
 
     QRectF r(scenePos, QSizeF(0, 0));
@@ -91,21 +91,31 @@ void TargetItem::updateSample(const QPointF &scenePos, float speedCmS, const QSt
     m_boundingRect = r.adjusted(-kFootprintRadiusMm, -kFootprintRadiusMm, kFootprintRadiusMm, kFootprintRadiusMm);
 
     m_head->setPos(scenePos);
-    refreshHead();
+    refreshHead(nowMs);
     update();
 }
 
-bool TargetItem::markStaleAndCheckExpired(qint64 nowMs)
+void TargetItem::tick(qint64 nowMs)
 {
-    m_stale = true;
-    refreshHead();
+    // No new telemetry sample this tick, but re-push the head's live-computed alpha and force a
+    // repaint anyway — paint() itself reads the wall clock (see below), so this is what actually
+    // makes the fade progress in real time instead of freezing at whatever it looked like the
+    // last time updateSample() ran.
+    refreshHead(nowMs);
     update();
-    return (nowMs - m_lastSeenMs) > kStaleGraceMs;
 }
 
-void TargetItem::refreshHead()
+float TargetItem::liveAlphaAt(qint64 nowMs) const
 {
-    const float alpha = m_stale ? 0.35f : 1.0f;
+    const qint64 age = nowMs - m_lastSeenMs;
+    if (age <= 0)
+        return 1.0f;
+    return std::clamp(1.0f - float(age) / float(kStaleGraceMs), 0.0f, 1.0f);
+}
+
+void TargetItem::refreshHead(qint64 nowMs)
+{
+    const float alpha = liveAlphaAt(nowMs);
     const QString label = QStringLiteral("#%1  %2  %3 cm/s")
                                .arg(m_id)
                                .arg(m_zoneLabel.isEmpty() ? QStringLiteral("-") : m_zoneLabel)
@@ -131,8 +141,15 @@ void TargetItem::paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWid
 
     painter->setRenderHint(QPainter::Antialiasing, true);
 
-    const qint64 nowMs = m_history.back().tMs;
-    const float staleFade = m_stale ? 0.35f : 1.0f; // dim while aging out after a dropped frame
+    // Read the actual wall clock here rather than the last sample's own timestamp. Using the
+    // sample timestamp meant that once updateSample() stopped being called (i.e. the exact
+    // moment a track needs to start visibly disappearing), every alpha computed below was frozen
+    // at whatever it was at the last real update — the item looked identical on every repaint
+    // until the instant it got deleted, which read as "stuck"/"frozen" rather than fading out.
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const float overallAlpha = liveAlphaAt(nowMs); // 1.0 fresh -> 0.0 at kStaleGraceMs, live
+    if (overallAlpha <= 0.0f)
+        return; // about to be swept/deleted by RadarScene; nothing left to draw
 
     // Fading trail: one segment per consecutive sample pair, alpha falls off with age. This is
     // spatially accurate (drawn in real scene/mm coordinates) so it naturally scales with zoom.
@@ -141,7 +158,7 @@ void TargetItem::paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWid
             const Sample &a = m_history[i - 1];
             const Sample &b = m_history[i];
             const qreal age = qreal(nowMs - b.tMs) / qreal(kTrailWindowMs);
-            const qreal alpha = std::clamp(1.0 - age, 0.0, 1.0) * 0.8 * staleFade;
+            const qreal alpha = std::clamp(1.0 - age, 0.0, 1.0) * 0.8 * overallAlpha;
             if (alpha <= 0.02)
                 continue;
             QColor c = m_color;
@@ -156,7 +173,7 @@ void TargetItem::paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWid
     // see TargetHeadItem's class comment for why.
     const QPointF dot = m_history.back().pos;
     QColor footprint = m_color;
-    footprint.setAlphaF(0.22f * staleFade);
+    footprint.setAlphaF(0.22f * overallAlpha);
     painter->setPen(Qt::NoPen);
     painter->setBrush(footprint);
     painter->drawEllipse(dot, kFootprintRadiusMm, kFootprintRadiusMm);

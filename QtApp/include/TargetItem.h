@@ -47,10 +47,19 @@ public:
     // Push a fresh sample (called once per telemetry frame this track was present in).
     void updateSample(const QPointF &scenePos, float speedCmS, const QString &zoneLabel, qint64 nowMs);
 
-    // Track absent from the latest frame: fade towards removal instead of vanishing instantly,
-    // which smooths over single dropped packets. Returns true once it has aged past the grace
-    // window and should be deleted by the owner.
-    bool markStaleAndCheckExpired(qint64 nowMs);
+    // True once more than kStaleGraceMs has elapsed (real wall-clock time, not telemetry frames)
+    // since the last updateSample() call. The owner (RadarScene) is expected to poll this from
+    // an independent QTimer and delete the item the moment it returns true — cleanup no longer
+    // depends on telemetry continuing to arrive at all.
+    bool isExpired(qint64 nowMs) const { return (nowMs - m_lastSeenMs) > kStaleGraceMs; }
+
+    // Periodic refresh from RadarScene's sweep timer, called for every *non*-expired item on
+    // every tick regardless of whether a new sample arrived. This is what keeps the fade-out
+    // animating in real time between telemetry frames (paint() itself also reads the live clock,
+    // but Qt only repaints when something calls update() — without this, an idle item would
+    // just sit there showing whatever it looked like at its last real sample forever until the
+    // moment it's deleted, i.e. exactly the "frozen ghost" bug this exists to fix).
+    void tick(qint64 nowMs);
 
     QRectF boundingRect() const override;
     void paint(QPainter *painter, const QStyleOptionGraphicsItem *option, QWidget *widget) override;
@@ -62,7 +71,8 @@ private:
     };
 
     void pruneHistory(qint64 nowMs);
-    void refreshHead();
+    void refreshHead(qint64 nowMs);
+    float liveAlphaAt(qint64 nowMs) const;
     QColor colorForId(quint8 id) const;
 
     quint8 m_id;
@@ -71,11 +81,10 @@ private:
     float m_speedCmS = 0.0f;
     QString m_zoneLabel;
     qint64 m_lastSeenMs = 0;
-    bool m_stale = false;
     QRectF m_boundingRect;
     TargetHeadItem *m_head;
 
-    static constexpr qint64 kTrailWindowMs = 2500;
-    static constexpr qint64 kStaleGraceMs = 600;
+    static constexpr qint64 kTrailWindowMs = 2500; // unchanged from before — this request only tightened expiry/fade timing
+    static constexpr qint64 kStaleGraceMs = 300; // real elapsed time since last sample, not frames
     static constexpr float kFootprintRadiusMm = 125.0f; // matches TARGET_RADIUS_MM on the ESP32
 };

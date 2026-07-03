@@ -55,6 +55,18 @@ void MainWindow::setupUi()
     toolbar->setMovable(false);
     addToolBar(toolbar);
 
+    // Shared across every toolbar button: a clear, high-contrast "pressed" flash so momentary
+    // commands (Refresh, Clear, ZONES, CFG, Connect) give instant click feedback, plus a bright
+    // "checked" state reserved for the true persistent toggles (DEBUG/MULTI/EMA below). Applied
+    // once here via descendant selector rather than per-button, so every button — checkable or
+    // not — gets consistent styling.
+    toolbar->setStyleSheet(
+        "QPushButton { background-color: #2b2f36; color: #cfd6e4; border: 1px solid #454b57;"
+        " border-radius: 3px; padding: 4px 10px; }"
+        "QPushButton:pressed { background-color: #00e5ff; color: #062b13; border: 1px solid #00e5ff; }"
+        "QPushButton:checked { background-color: #39ff14; color: #062b13; border: 1px solid #39ff14;"
+        " font-weight: bold; }");
+
     toolbar->addWidget(new QLabel(tr("Port:"), this));
     m_portCombo->setMinimumWidth(160);
     toolbar->addWidget(m_portCombo);
@@ -75,17 +87,15 @@ void MainWindow::setupUi()
 
     toolbar->addSeparator();
 
-    // DEBUG/MULTI/EMA are firmware-side toggles, so make them checkable and style the checked
-    // state distinctly. The firmware only echoes these as human-readable text (not JSON), which
-    // RadarComm deliberately ignores, so there's no live readback — initialChecked below just
-    // mirrors ESP32_RD03D.ino's boot defaults (DEBUG_RAW_TARGETS=false, MULTI_TARGET=true,
-    // EMA_ENABLED=true) as a best-effort starting point, not a synced device state.
-    static const QString kToggleStyle = QStringLiteral(
-        "QPushButton { background-color: #2b2f36; color: #cfd6e4; border: 1px solid #454b57;"
-        " border-radius: 3px; padding: 4px 10px; }"
-        "QPushButton:checked { background-color: #00c853; color: #062b13; border: 1px solid #39ff14;"
-        " font-weight: bold; }");
-
+    // DEBUG/MULTI/EMA are firmware-side persistent toggles, so they're checkable and land in
+    // the bright ":checked" state above. The firmware only echoes these as human-readable text
+    // (not JSON), which RadarComm deliberately ignores, so there's no live readback —
+    // initialChecked below just mirrors ESP32_RD03D.ino's boot defaults (DEBUG_RAW_TARGETS=false,
+    // MULTI_TARGET=true, EMA_ENABLED=true) as a best-effort starting point, not a synced device
+    // state. ZONES/CFG are deliberately NOT checkable: on the firmware they're one-shot
+    // "resend/dump now" commands with no persisted on/off state, so a checked state for them
+    // would just be a lie that sticks after a single click — the shared :pressed flash above
+    // already gives them clear, honest click feedback.
     const struct { const char *label; const char *cmd; bool checkable; bool initialChecked; } cmds[] = {
         {"DEBUG", "DEBUG", true, false},
         {"MULTI", "MULTI", true, true},
@@ -100,7 +110,6 @@ void MainWindow::setupUi()
         if (c.checkable) {
             btn->setCheckable(true);
             btn->setChecked(c.initialChecked);
-            btn->setStyleSheet(kToggleStyle);
         }
         toolbar->addWidget(btn);
     }

@@ -34,8 +34,23 @@ const uint8_t LOST_FRAMES_THRESH = 10;
 const uint8_t CONFIRM_FRAMES = 0; // 0 = immediate zone change
 const float DEADBAND_SIZE = 50.0; // mm from tile border (reduced from 100)
 const unsigned long OCCUPANCY_OFF_DELAY = 300; // ms
-// Target radial footprint 
+// Target radial footprint
 const float TARGET_RADIUS_MM = 125.0; // mm
+// Spatial deadzone: the RD-03D leaks a back-lobe behind the sensor, so raw detections this
+// close/behind (y < 200mm) are near-field noise, not a real target in front of the sensor.
+// Filtered before track association so they can neither spawn nor refresh a track.
+const float DEADZONE_Y_MM = 200.0; // mm
+
+// ===== GHOST / STATIC CLUTTER REJECTION =====
+// The RD-03D is Doppler-based: a genuinely static reflector (wall corner, furniture edge,
+// multipath bounce) reports ~0.0 cm/s forever, while a person is essentially never perfectly
+// motionless (gait, sway, breathing-driven micro-motion all show up as nonzero speed). These
+// three knobs turn that physical fact into a track-confirmation gate — see the "confirmed"
+// field on Track below for how they're used together.
+const float MIN_SPAWN_SPEED_CM_S = 2.0;    // reject spawning a track if its first detection is ~stationary
+const uint8_t CONFIRM_TRACK_FRAMES = 4;    // consecutive matched frames required before a track is trusted
+const float MIN_MOVEMENT_TO_CONFIRM_MM = 150.0; // cumulative displacement from spawn point required to confirm
+const uint8_t MAX_TENTATIVE_FRAMES = 30;   // give up (free the slot) if never confirmed within this many hits
 
 struct Track {
   float x, y;           // smoothed position
@@ -49,6 +64,12 @@ struct Track {
   uint8_t proposed_zone;
   // Bitmask of overlapped zones via radial footprint (NUM_ZONES<=16 -> uint16_t ok)
   uint16_t zone_mask;
+  // Ghost-rejection state: a track is tentative (unconfirmed) until it accumulates enough
+  // matched frames AND enough movement away from where it first appeared. Only confirmed
+  // tracks are exposed via JSON telemetry or counted toward zone occupancy.
+  bool confirmed;
+  float spawn_x, spawn_y; // raw position at the moment this track was created
+  uint8_t hits;           // consecutive matched frames since spawn (capped, see usage)
 };
 
 Track tracks[MAX_TRACKS];
@@ -174,6 +195,7 @@ void setup() {
     tracks[i].active = false;
     tracks[i].current_zone = 0xFF;
     tracks[i].zone_mask = 0;
+    tracks[i].confirmed = false;
   }
   
   // Initialize zone occupancy
@@ -328,7 +350,9 @@ void updateZoneOccupancy() {
   bool zone_has_track[NUM_ZONES] = {false};
   
   for (uint8_t i = 0; i < MAX_TRACKS; i++) {
-    if (!tracks[i].active) continue;
+    // Tentative (unconfirmed) tracks never contribute to zone occupancy — otherwise a static
+    // clutter reflection would light up a zone before ever being rejected.
+    if (!tracks[i].active || !tracks[i].confirmed) continue;
 
     // Mark all zones overlapped by this track's radial footprint
     if (tracks[i].zone_mask != 0) {
@@ -444,7 +468,9 @@ void sendTelemetryJSON() {
 
   JsonArray t = doc.createNestedArray("t");
   for (uint8_t i = 0; i < MAX_TRACKS; i++) {
-    if (!tracks[i].active) continue;
+    // Only confirmed tracks are reported to the Qt client — tentative tracks may still be
+    // static clutter that hasn't been rejected yet (see the ghost-rejection gate above).
+    if (!tracks[i].active || !tracks[i].confirmed) continue;
     JsonObject o = t.createNestedObject();
     o["id"] = tracks[i].id;
     // Positions are mm-scale; round to the nearest mm to keep the payload compact
@@ -586,7 +612,18 @@ void loop() {
     for (uint8_t d = 0; d < n; d++) {
       RadarTarget t = radar.getTarget(d);
       if (!t.detected) continue;
-      
+
+      // Spatial deadzone: ignore anything behind the sensor / too close (back-lobe leakage).
+      // Skipping it entirely here means it can neither create a new track nor refresh an
+      // existing one — an existing track simply ages out via frames_lost as usual.
+      if (t.y < DEADZONE_Y_MM) {
+        if (DEBUG_RAW_TARGETS) {
+          Serial.print("Ignoring detection in deadzone: y=");
+          Serial.println(t.y);
+        }
+        continue;
+      }
+
       // Find closest existing track
       float min_dist;
       uint8_t track_idx = findClosestTrack(t.x, t.y, min_dist);
@@ -644,7 +681,40 @@ void loop() {
         }
         
         track.frames_lost = 0;
-        
+
+        // Ghost-rejection gate: an unconfirmed track only gets promoted once it's been matched
+        // for several consecutive frames AND has actually traveled away from its spawn point.
+        // Static clutter matches every frame (it never leaves) but never satisfies the movement
+        // check, so it just sits here as "tentative" forever — until MAX_TENTATIVE_FRAMES gives
+        // up on it and frees the slot. Movement is measured against raw (pre-EMA) positions so
+        // slow-moving real targets aren't penalized by the smoothing's own damping.
+        if (!track.confirmed) {
+          if (track.hits < 255) track.hits++;
+
+          float spawn_dx = track.raw_x - track.spawn_x;
+          float spawn_dy = track.raw_y - track.spawn_y;
+          float moved_from_spawn = sqrt(spawn_dx * spawn_dx + spawn_dy * spawn_dy);
+
+          if (track.hits >= CONFIRM_TRACK_FRAMES && moved_from_spawn >= MIN_MOVEMENT_TO_CONFIRM_MM) {
+            track.confirmed = true;
+            if (DEBUG_RAW_TARGETS) {
+              Serial.print("Track "); Serial.print(track.id);
+              Serial.println(" CONFIRMED (real moving target)");
+            }
+          } else if (track.hits >= MAX_TENTATIVE_FRAMES) {
+            // Matched consistently but never moved far enough to be trusted: almost certainly
+            // a stationary reflection, not a slow-starting person. Drop it instead of letting
+            // it squat on one of the few track slots indefinitely.
+            if (DEBUG_RAW_TARGETS) {
+              Serial.print("Track "); Serial.print(track.id);
+              Serial.println(" DROPPED (never confirmed - static clutter)");
+            }
+            track.active = false;
+            track.zone_mask = 0;
+            continue; // nothing further to do for this detection this frame
+          }
+        }
+
         // Determine zone with deadband and confirmation
         // Use smoothed coordinates now that EMA is adaptive and responsive
         uint8_t new_zone = getZoneForPoint(track.x, track.y);
@@ -740,21 +810,39 @@ void loop() {
         // Compute overlapped zones via radial footprint for occupancy
         track.zone_mask = computeZoneMaskForCircle(track.x, track.y, TARGET_RADIUS_MM);
       } else {
-        // Create new track - find free slot
+        // Static clutter rejection: a stationary very first detection is almost always a
+        // multipath/furniture reflection rather than a person who just entered the FOV and
+        // hasn't started moving yet — real entries are essentially never at exactly ~0 speed
+        // given gait/sway/breathing micro-motion. Drop it without spawning a track at all.
+        if (fabs(t.speed) < MIN_SPAWN_SPEED_CM_S) {
+          if (DEBUG_RAW_TARGETS) {
+            Serial.print("Rejecting spawn (static clutter, speed=");
+            Serial.print(t.speed);
+            Serial.println(")");
+          }
+          continue;
+        }
+
+        // Create new track - find free slot. Starts tentative (unconfirmed): see the
+        // ghost-rejection gate above for how/when it gets promoted or dropped.
         for (uint8_t i = 0; i < MAX_TRACKS; i++) {
           if (!tracks[i].active) {
             tracks[i].active = true;
+            tracks[i].confirmed = false;
             tracks[i].id = next_track_id++;
             tracks[i].x = tracks[i].raw_x = t.x;
             tracks[i].y = tracks[i].raw_y = t.y;
+            tracks[i].spawn_x = t.x;
+            tracks[i].spawn_y = t.y;
+            tracks[i].hits = 1;
             tracks[i].speed = t.speed;
             tracks[i].frames_lost = 0;
             tracks[i].current_zone = getZoneForPoint(t.x, t.y);
             tracks[i].zone_confirm_count = 0;
             tracks[i].proposed_zone = tracks[i].current_zone;
             tracks[i].zone_mask = computeZoneMaskForCircle(tracks[i].x, tracks[i].y, TARGET_RADIUS_MM);
-            
-            Serial.print("New track ");
+
+            Serial.print("New tentative track ");
             Serial.print(tracks[i].id);
             Serial.print(" at (");
             Serial.print(t.x);
