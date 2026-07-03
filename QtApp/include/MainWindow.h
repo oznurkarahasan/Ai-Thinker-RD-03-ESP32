@@ -23,6 +23,7 @@ private slots:
     void toggleConnection();
     void onConnectionStateChanged(bool connected);
     void onCommError(const QString &message);
+    void clearScene();
 
 private:
     void setupUi();

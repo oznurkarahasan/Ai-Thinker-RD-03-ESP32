@@ -38,13 +38,15 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(m_comm, &RadarComm::configReceived, m_scene, &RadarScene::onConfigReceived);
     connect(m_comm, &RadarComm::configReceived, m_dashboard, &DashboardPanel::setConfig);
-    connect(m_comm, &RadarComm::configReceived, this, [this](const RadarConfig &) { fitGridInView(); });
     connect(m_comm, &RadarComm::targetsUpdated, m_scene, &RadarScene::onTargetsUpdated);
     connect(m_comm, &RadarComm::connectionStateChanged, this, &MainWindow::onConnectionStateChanged);
     connect(m_comm, &RadarComm::errorOccurred, this, &MainWindow::onCommError);
     connect(m_scene, &RadarScene::frameRendered, m_dashboard, &DashboardPanel::onFrameRendered);
 
     refreshPorts();
+    // The view's logical area never changes after this (see RadarScene::lockedViewRect()), so
+    // one fitInView() up front is all that's needed beyond handling actual widget resizes.
+    fitGridInView();
 }
 
 void MainWindow::setupUi()
@@ -65,13 +67,41 @@ void MainWindow::setupUi()
     connect(m_connectButton, &QPushButton::clicked, this, &MainWindow::toggleConnection);
 
     toolbar->addSeparator();
-    const struct { const char *label; const char *cmd; } cmds[] = {
-        {"DEBUG", "DEBUG"}, {"MULTI", "MULTI"}, {"EMA", "EMA"}, {"ZONES", "ZONES"}, {"CFG", "CFG"},
+
+    auto *clearBtn = new QPushButton(tr("Clear"), this);
+    clearBtn->setToolTip(tr("Wipe all targets, trails and zone occupancy from the view"));
+    connect(clearBtn, &QPushButton::clicked, this, &MainWindow::clearScene);
+    toolbar->addWidget(clearBtn);
+
+    toolbar->addSeparator();
+
+    // DEBUG/MULTI/EMA are firmware-side toggles, so make them checkable and style the checked
+    // state distinctly. The firmware only echoes these as human-readable text (not JSON), which
+    // RadarComm deliberately ignores, so there's no live readback — initialChecked below just
+    // mirrors ESP32_RD03D.ino's boot defaults (DEBUG_RAW_TARGETS=false, MULTI_TARGET=true,
+    // EMA_ENABLED=true) as a best-effort starting point, not a synced device state.
+    static const QString kToggleStyle = QStringLiteral(
+        "QPushButton { background-color: #2b2f36; color: #cfd6e4; border: 1px solid #454b57;"
+        " border-radius: 3px; padding: 4px 10px; }"
+        "QPushButton:checked { background-color: #00c853; color: #062b13; border: 1px solid #39ff14;"
+        " font-weight: bold; }");
+
+    const struct { const char *label; const char *cmd; bool checkable; bool initialChecked; } cmds[] = {
+        {"DEBUG", "DEBUG", true, false},
+        {"MULTI", "MULTI", true, true},
+        {"EMA", "EMA", true, true},
+        {"ZONES", "ZONES", false, false},
+        {"CFG", "CFG", false, false},
     };
     for (const auto &c : cmds) {
         auto *btn = new QPushButton(tr(c.label), this);
         const QString cmd = QString::fromLatin1(c.cmd);
         connect(btn, &QPushButton::clicked, this, [this, cmd]() { m_comm->sendCommand(cmd); });
+        if (c.checkable) {
+            btn->setCheckable(true);
+            btn->setChecked(c.initialChecked);
+            btn->setStyleSheet(kToggleStyle);
+        }
         toolbar->addWidget(btn);
     }
 
@@ -98,11 +128,18 @@ void MainWindow::setupView()
     m_view->setOptimizationFlag(QGraphicsView::DontSavePainterState, true);
     m_view->setTransformationAnchor(QGraphicsView::AnchorViewCenter);
     m_view->setDragMode(QGraphicsView::NoDrag);
+    // The view's logical area is fixed (see RadarScene::lockedViewRect()); scrollbars would
+    // only let the user pan into permanently-blank space, so they're pointless here.
+    m_view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_view->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 }
 
 void MainWindow::fitGridInView()
 {
-    m_view->fitInView(m_scene->sceneRect(), Qt::KeepAspectRatio);
+    // Deliberately fit against the scene's fixed logical rect, not any dynamically computed
+    // bounds (e.g. scene()->itemsBoundingRect()) — a stray target far outside normal sensor
+    // range must never change the view's zoom/transform.
+    m_view->fitInView(RadarScene::lockedViewRect(), Qt::KeepAspectRatio);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event)
@@ -147,4 +184,10 @@ void MainWindow::onConnectionStateChanged(bool connected)
 void MainWindow::onCommError(const QString &message)
 {
     statusBar()->showMessage(message, 5000);
+}
+
+void MainWindow::clearScene()
+{
+    m_scene->clearScene();
+    statusBar()->showMessage(tr("Cleared all targets and zone occupancy"), 3000);
 }

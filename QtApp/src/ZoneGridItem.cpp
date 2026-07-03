@@ -66,12 +66,14 @@ void ZoneGridItem::paint(QPainter *painter, const QStyleOptionGraphicsItem *, QW
 {
     painter->setRenderHint(QPainter::Antialiasing, true);
 
-    static const QColor kExcludedFill(70, 70, 78, 90);
-    static const QColor kExcludedBorder(90, 90, 98);
-    static const QColor kEmptyFill(40, 44, 52, 60);
-    static const QColor kEmptyBorder(90, 100, 115);
-    static const QColor kOccupiedFill(255, 70, 70, 90);
-    static const QColor kOccupiedBorder(255, 120, 120);
+    // Unoccupied tiles are outline-only (no fill) so the radar arcs stay visible underneath —
+    // only an occupied tile gets a distinct soft-red wash. Excluded corners (A4/D4 on a 4x4
+    // grid) stay grayed-out with a faint fill so they read as inactive.
+    static const QColor kExcludedFill(60, 62, 68, 70);
+    static const QColor kExcludedBorder(110, 112, 118, 140);
+    static const QColor kEmptyBorder(180, 190, 205, 60);
+    static const QColor kOccupiedFill(255, 60, 60, 85);
+    static const QColor kOccupiedBorder(255, 110, 110, 220);
 
     QFont labelFont = painter->font();
     labelFont.setPointSizeF(labelFont.pointSizeF() + 1.0);
@@ -89,11 +91,11 @@ void ZoneGridItem::paint(QPainter *painter, const QStyleOptionGraphicsItem *, QW
             painter->setBrush(kOccupiedFill);
         } else {
             painter->setPen(QPen(kEmptyBorder, 1));
-            painter->setBrush(kEmptyFill);
+            painter->setBrush(Qt::NoBrush);
         }
         painter->drawRect(z.rect);
 
-        painter->setPen(excluded ? QColor(140, 140, 148) : (occupied ? Qt::white : QColor(190, 195, 205)));
+        painter->setPen(excluded ? QColor(130, 130, 138, 160) : (occupied ? Qt::white : QColor(190, 195, 205, 170)));
         painter->drawText(z.rect, Qt::AlignCenter, z.name);
     }
 
@@ -105,6 +107,6 @@ void ZoneGridItem::paint(QPainter *painter, const QStyleOptionGraphicsItem *, QW
     marker.lineTo(14, 26);
     marker.closeSubpath();
     painter->setPen(Qt::NoPen);
-    painter->setBrush(QColor(0, 200, 255));
+    painter->setBrush(QColor(0x00, 0xE5, 0xFF));
     painter->drawPath(marker);
 }

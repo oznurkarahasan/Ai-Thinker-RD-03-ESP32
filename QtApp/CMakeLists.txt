@@ -18,6 +18,7 @@ add_executable(RadarDesktop
     src/main.cpp
     src/RadarComm.cpp
     src/ZoneGridItem.cpp
+    src/RangeRingsItem.cpp
     src/TargetItem.cpp
     src/RadarScene.cpp
     src/DashboardPanel.cpp
@@ -25,6 +26,7 @@ add_executable(RadarDesktop
     include/RadarTypes.h
     include/RadarComm.h
     include/ZoneGridItem.h
+    include/RangeRingsItem.h
     include/TargetItem.h
     include/RadarScene.h
     include/DashboardPanel.h

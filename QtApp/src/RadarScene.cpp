@@ -2,28 +2,35 @@
 
 #include <QDateTime>
 #include <QSet>
+#include <utility>
 
+#include "RangeRingsItem.h"
 #include "TargetItem.h"
 #include "ZoneGridItem.h"
 
 RadarScene::RadarScene(QObject *parent)
     : QGraphicsScene(parent)
     , m_grid(new ZoneGridItem())
+    , m_rings(new RangeRingsItem())
 {
     setBackgroundBrush(QColor(18, 20, 24));
-    addItem(m_grid);
-    // Default scene rect until a "cfg" frame arrives (radar at bottom-center, 4x4m ahead).
-    setSceneRect(-2000, -4000, 4000, 4000);
+
+    m_rings->setMaxRangeMm(8000.0f);
+    m_rings->setRingStepMm(1000.0f);
+    addItem(m_rings); // zValue -10: drawn first, underneath the zone grid
+
+    addItem(m_grid); // zValue 0: overlaid on top of the range rings
+
+    // Fixed for the lifetime of the scene — see the class comment on lockedViewRect().
+    setSceneRect(lockedViewRect());
 }
 
 void RadarScene::onConfigReceived(const RadarConfig &config)
 {
     m_config = config;
     m_grid->setConfig(config);
-    setSceneRect(-config.gridWidth / 2.0 * config.tileSizeMm,
-                 -static_cast<double>(config.gridHeight) * config.tileSizeMm,
-                 config.gridWidth * config.tileSizeMm,
-                 config.gridHeight * config.tileSizeMm);
+    // Deliberately NOT touching setSceneRect() here: the view's logical area is fixed at
+    // construction and must stay independent of whatever grid dimensions the firmware reports.
 }
 
 void RadarScene::onTargetsUpdated(const QVector<TargetState> &targets, quint32 zoneOccupiedMask, quint32 seq)
@@ -68,4 +75,18 @@ void RadarScene::onTargetsUpdated(const QVector<TargetState> &targets, quint32 z
     }
 
     emit frameRendered(m_targetItems.size(), zoneOccupiedMask, seq);
+}
+
+void RadarScene::clearScene()
+{
+    for (TargetItem *item : std::as_const(m_targetItems)) {
+        removeItem(item);
+        delete item;
+    }
+    m_targetItems.clear();
+
+    m_lastMask = 0;
+    m_grid->setOccupancyMask(0);
+
+    emit frameRendered(0, 0, 0);
 }

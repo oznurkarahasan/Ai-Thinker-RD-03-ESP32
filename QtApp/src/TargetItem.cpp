@@ -3,12 +3,62 @@
 #include <QPainter>
 #include <algorithm>
 
+// ===== TargetHeadItem =====
+
+TargetHeadItem::TargetHeadItem(QGraphicsItem *parent)
+    : QGraphicsItem(parent)
+{
+    setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    setZValue(1); // above the parent TargetItem's trail/footprint paint
+}
+
+void TargetHeadItem::setAppearance(const QColor &color, const QString &label, float alpha)
+{
+    prepareGeometryChange();
+    m_color = color;
+    m_label = label;
+    m_alpha = alpha;
+    update();
+}
+
+QRectF TargetHeadItem::boundingRect() const
+{
+    // Fixed device-pixel-space rect: dot + generously wide label to the right of it.
+    // ItemIgnoresTransformations means these are real pixels regardless of view zoom, so this
+    // never needs to depend on the current scale — that dependency was the root cause of the
+    // old smearing bug.
+    return QRectF(-8, -22, 190, 34);
+}
+
+void TargetHeadItem::paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *)
+{
+    painter->setRenderHint(QPainter::Antialiasing, true);
+
+    QColor dotColor = m_color;
+    dotColor.setAlphaF(m_alpha);
+    painter->setPen(Qt::NoPen);
+    painter->setBrush(dotColor);
+    painter->drawEllipse(QPointF(0, 0), 6.0, 6.0);
+
+    QColor textColor = Qt::white;
+    textColor.setAlphaF(m_alpha);
+    painter->setPen(textColor);
+    QFont f = painter->font();
+    f.setPointSizeF(9.0);
+    f.setBold(true);
+    painter->setFont(f);
+    painter->drawText(QPointF(10, -8), m_label);
+}
+
+// ===== TargetItem =====
+
 TargetItem::TargetItem(quint8 id, QGraphicsItem *parent)
     : QGraphicsItem(parent)
     , m_id(id)
     , m_color(colorForId(id))
+    , m_head(new TargetHeadItem(this))
 {
-    setZValue(10); // above the zone grid
+    setZValue(10); // above the zone grid and range rings
 }
 
 QColor TargetItem::colorForId(quint8 id) const
@@ -38,16 +88,29 @@ void TargetItem::updateSample(const QPointF &scenePos, float speedCmS, const QSt
     QRectF r(scenePos, QSizeF(0, 0));
     for (const Sample &s : m_history)
         r |= QRectF(s.pos, QSizeF(0, 0));
-    m_boundingRect = r.adjusted(-kFootprintRadiusMm - 40, -kFootprintRadiusMm - 40,
-                                kFootprintRadiusMm + 40, kFootprintRadiusMm + 40);
+    m_boundingRect = r.adjusted(-kFootprintRadiusMm, -kFootprintRadiusMm, kFootprintRadiusMm, kFootprintRadiusMm);
+
+    m_head->setPos(scenePos);
+    refreshHead();
     update();
 }
 
 bool TargetItem::markStaleAndCheckExpired(qint64 nowMs)
 {
     m_stale = true;
+    refreshHead();
     update();
     return (nowMs - m_lastSeenMs) > kStaleGraceMs;
+}
+
+void TargetItem::refreshHead()
+{
+    const float alpha = m_stale ? 0.35f : 1.0f;
+    const QString label = QStringLiteral("#%1  %2  %3 cm/s")
+                               .arg(m_id)
+                               .arg(m_zoneLabel.isEmpty() ? QStringLiteral("-") : m_zoneLabel)
+                               .arg(m_speedCmS, 0, 'f', 1);
+    m_head->setAppearance(m_color, label, alpha);
 }
 
 void TargetItem::pruneHistory(qint64 nowMs)
@@ -71,7 +134,8 @@ void TargetItem::paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWid
     const qint64 nowMs = m_history.back().tMs;
     const float staleFade = m_stale ? 0.35f : 1.0f; // dim while aging out after a dropped frame
 
-    // Fading trail: one segment per consecutive sample pair, alpha falls off with age.
+    // Fading trail: one segment per consecutive sample pair, alpha falls off with age. This is
+    // spatially accurate (drawn in real scene/mm coordinates) so it naturally scales with zoom.
     if (m_history.size() > 1) {
         for (int i = 1; i < m_history.size(); ++i) {
             const Sample &a = m_history[i - 1];
@@ -87,43 +151,13 @@ void TargetItem::paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWid
         }
     }
 
-    const QPointF dot = m_history.back().pos;
-
     // Real-world-scaled footprint circle (matches the firmware's zone-occupancy radius).
+    // The crisp head dot + text label are drawn by the m_head child item instead of here —
+    // see TargetHeadItem's class comment for why.
+    const QPointF dot = m_history.back().pos;
     QColor footprint = m_color;
     footprint.setAlphaF(0.22f * staleFade);
     painter->setPen(Qt::NoPen);
     painter->setBrush(footprint);
     painter->drawEllipse(dot, kFootprintRadiusMm, kFootprintRadiusMm);
-
-    // Crisp center dot + label, counter-scaled so they stay a constant pixel size at any zoom.
-    qreal m11 = painter->worldTransform().m11();
-    if (m11 <= 0.0001)
-        m11 = 1.0;
-    const qreal invScale = 1.0 / m11;
-
-    painter->save();
-    painter->translate(dot);
-    painter->scale(invScale, invScale);
-
-    QColor dotColor = m_color;
-    dotColor.setAlphaF(staleFade);
-    painter->setPen(Qt::NoPen);
-    painter->setBrush(dotColor);
-    painter->drawEllipse(QPointF(0, 0), 6.0, 6.0);
-
-    QColor textColor = Qt::white;
-    textColor.setAlphaF(staleFade);
-    painter->setPen(textColor);
-    QFont f = painter->font();
-    f.setPointSizeF(9.0);
-    f.setBold(true);
-    painter->setFont(f);
-    const QString label = QStringLiteral("#%1  %2  %3 cm/s")
-                               .arg(m_id)
-                               .arg(m_zoneLabel.isEmpty() ? QStringLiteral("-") : m_zoneLabel)
-                               .arg(m_speedCmS, 0, 'f', 1);
-    painter->drawText(QPointF(10, -8), label);
-
-    painter->restore();
 }
