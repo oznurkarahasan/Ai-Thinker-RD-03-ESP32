@@ -52,9 +52,12 @@ MainWindow::MainWindow(QWidget *parent)
     wireSignals();
     restoreSettings();
 
-    // A previously-saved "closed" state for the log dock (from an earlier
-    // session where it got closed) would otherwise keep restoring as
-    // hidden with no way to bring it back. Always start with it visible.
+    // restoreState() above can reposition docks according to whatever was
+    // saved in an earlier session (e.g. the log ending up tabbed together
+    // with the right-hand panel instead of its own strip along the
+    // bottom). The log belongs at the bottom, always visible - re-assert
+    // both after restoring, overriding any stale saved arrangement.
+    addDockWidget(Qt::BottomDockWidgetArea, logDock);
     logDock->setVisible(true);
 }
 
