@@ -100,7 +100,12 @@ void RadarModel::onTrackPositionUpdated(int id, double x, double y, const QStrin
         t.y = y;
         t.hasPosition = true;
     }
-    t.zone = zone;
+    // A null (not just empty) zone string means "this message doesn't carry
+    // zone information" (e.g. the per-frame footprint-overlap debug line) -
+    // leave the last known current_zone alone instead of blanking it out.
+    if (!zone.isNull()) {
+        t.zone = zone;
+    }
     emit tracksChanged();
 }
 

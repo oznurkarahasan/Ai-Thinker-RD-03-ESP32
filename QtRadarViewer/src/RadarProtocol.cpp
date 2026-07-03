@@ -102,6 +102,15 @@ void RadarProtocol::feedLine(const QString &lineIn) {
         R"(^Track (\d+):\s*\((-?[\d.]+),\s*(-?[\d.]+)\)\s*Zone:\s*(NONE|[A-D][1-4])$)");
     static const QRegularExpression reTrackIsInZone(
         R"(^Track (\d+) is in (?:zone ([A-D][1-4])|NO ZONE) at \((-?[\d.]+),\s*(-?[\d.]+)\)$)");
+    // The actual per-frame position line this firmware prints (inside
+    // updateZoneOccupancy(), only when DEBUG_RAW_TARGETS is on): the radial
+    // footprint may overlap several zones at once, or none. This is a
+    // different concept from the single, hysteresis-based "current_zone"
+    // that "entered zone" / the ZONES command report, so only the position
+    // is used from it - the zone field is passed through as null, meaning
+    // "leave whatever current_zone we already know about untouched".
+    static const QRegularExpression reTrackOverlaps(
+        R"(^Track (\d+) overlaps (?:zones:\s*[A-D][1-4](?:,\s*[A-D][1-4])*|NO ZONE) at \((-?[\d.]+),\s*(-?[\d.]+)\)$)");
     static const QRegularExpression reEnteredZone(R"(^Track (\d+) entered zone:\s*([A-D][1-4])$)");
 
     if (auto m = reNewTrack.match(trimmed); m.hasMatch()) {
@@ -113,13 +122,24 @@ void RadarProtocol::feedLine(const QString &lineIn) {
         return;
     }
     if (auto m = reCurrentTrackLine.match(trimmed); m.hasMatch()) {
-        const QString zone = m.captured(4) == QLatin1String("NONE") ? QString() : m.captured(4);
+        // "NONE" is an explicit, known state (clear the zone) - use an
+        // empty-but-non-null string for it; null is reserved for "this
+        // message doesn't know the zone, don't touch it".
+        const QString zone = m.captured(4) == QLatin1String("NONE") ? QStringLiteral("") : m.captured(4);
         emit trackPositionUpdated(m.captured(1).toInt(), m.captured(2).toDouble(), m.captured(3).toDouble(), zone);
         return;
     }
     if (auto m = reTrackIsInZone.match(trimmed); m.hasMatch()) {
-        emit trackPositionUpdated(m.captured(1).toInt(), m.captured(3).toDouble(), m.captured(4).toDouble(),
-                                   m.captured(2));
+        // Same null-vs-empty distinction: an unmatched "zone" group here
+        // means the "NO ZONE" branch matched, which is an explicit "none".
+        QString zone = m.captured(2);
+        if (zone.isNull()) zone = QStringLiteral("");
+        emit trackPositionUpdated(m.captured(1).toInt(), m.captured(3).toDouble(), m.captured(4).toDouble(), zone);
+        return;
+    }
+    if (auto m = reTrackOverlaps.match(trimmed); m.hasMatch()) {
+        emit trackPositionUpdated(m.captured(1).toInt(), m.captured(2).toDouble(), m.captured(3).toDouble(),
+                                   QString()); // null: position-only, current_zone is reported elsewhere
         return;
     }
     if (auto m = reEnteredZone.match(trimmed); m.hasMatch()) {

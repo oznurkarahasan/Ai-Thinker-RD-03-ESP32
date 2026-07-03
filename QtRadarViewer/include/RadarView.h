@@ -2,6 +2,7 @@
 
 #include <QWidget>
 #include <QVector>
+#include <QMap>
 #include <QPointF>
 #include <QElapsedTimer>
 
@@ -24,12 +25,13 @@ public slots:
     void setShowTargets(bool show);
     void setShowTrail(bool show);
     void setShowTracks(bool show);
+    void setDimStationary(bool dim);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
 
 private slots:
-    void onTargetsChanged();
+    void onTracksChanged();
 
 private:
     bool targetInFov(double screenX, double screenY) const;
@@ -38,6 +40,16 @@ private:
     void drawTrail(QPainter &painter, double k) const;
     void drawTargets(QPainter &painter, double k) const;
     void drawTracks(QPainter &painter, double k) const;
+    void pruneTrail(qint64 now);
+
+    // A track that has barely moved for kStationaryWindowMs is more likely
+    // to be a static clutter/multipath reflection than a person - the
+    // RD-03D and similar cheap FMCW modules are known to occasionally latch
+    // onto a fixed reflector and report it at ~0 speed indefinitely. Such
+    // tracks are dimmed (not deleted) so a real, very-still person is still
+    // visible, just visually de-emphasized and labelled.
+    bool isTrackStationary(int trackId, qint64 now) const;
+    double stationaryOpacityFactor(int trackId, qint64 now) const;
 
     RadarModel *m_model;
     bool m_half = true;
@@ -45,12 +57,22 @@ private:
     bool m_showTargets = false;
     bool m_showTrail = true;
     bool m_showTracks = true;
+    bool m_dimStationary = true;
 
-    struct TrailFrame {
+    // One fading path per track ID (not per array index!). Connecting
+    // points by their position in the firmware's "Targets: N" list instead
+    // of by the track's own ID would draw a line between two physically
+    // unrelated detections whenever a target appears/disappears/reorders -
+    // that's what caused stray diagonal lines across the whole view.
+    struct TrailPoint {
         qint64 timestampMs;
-        QVector<QPointF> pointsMm;
+        QPointF mm;
     };
-    QVector<TrailFrame> m_trail;
+    QMap<int, QVector<TrailPoint>> m_trackTrails;
     QElapsedTimer m_clock;
     static constexpr qint64 kTrailMs = 30000;
+    static constexpr qint64 kStationaryWindowMs = 4000;
+    static constexpr double kStationaryRadiusMm = 60.0;
+    static constexpr double kStationaryOpacity = 0.22;
+    static constexpr double kTargetTrackAssociationMm = 600.0;
 };

@@ -19,9 +19,9 @@ RadarView::RadarView(RadarModel *model, QWidget *parent)
 
     m_clock.start();
 
-    connect(m_model, &RadarModel::targetsChanged, this, &RadarView::onTargetsChanged);
+    connect(m_model, &RadarModel::targetsChanged, this, [this] { update(); });
     connect(m_model, &RadarModel::zonesChanged, this, [this] { update(); });
-    connect(m_model, &RadarModel::tracksChanged, this, [this] { update(); });
+    connect(m_model, &RadarModel::tracksChanged, this, &RadarView::onTracksChanged);
 
     // Decouple repaint cadence from the (potentially bursty) serial data
     // rate: repaint at a steady ~30 fps instead of once per model signal.
@@ -33,27 +33,74 @@ RadarView::RadarView(RadarModel *model, QWidget *parent)
 void RadarView::setHalfFov(bool half) { m_half = half; }
 void RadarView::setScaleMmPerPixel(double mmPerPx) { m_mmPerPx = std::max(1.0, mmPerPx); }
 void RadarView::setShowTargets(bool show) { m_showTargets = show; }
-void RadarView::setShowTrail(bool show) {
-    m_showTrail = show;
-    if (!show) m_trail.clear();
-}
+void RadarView::setShowTrail(bool show) { m_showTrail = show; }
 void RadarView::setShowTracks(bool show) { m_showTracks = show; }
+void RadarView::setDimStationary(bool dim) { m_dimStationary = dim; }
 
-void RadarView::onTargetsChanged() {
-    if (!m_showTrail) return;
-    const QVector<Target> targets = m_model->targets();
-    if (targets.isEmpty()) return;
+void RadarView::onTracksChanged() {
+    // Position history is collected unconditionally (not just when the
+    // trail is visible) because stationary-target detection needs it too.
+    const qint64 now = m_clock.elapsed();
 
-    TrailFrame frame;
-    frame.timestampMs = m_clock.elapsed();
-    frame.pointsMm.reserve(targets.size());
-    for (const Target &t : targets) frame.pointsMm.append(QPointF(t.x, t.y));
-    m_trail.append(frame);
-
-    const qint64 now = frame.timestampMs;
-    while (!m_trail.isEmpty() && (now - m_trail.first().timestampMs) > kTrailMs) {
-        m_trail.removeFirst();
+    for (const Track &t : m_model->tracks()) {
+        if (!t.hasPosition) continue;
+        QVector<TrailPoint> &pts = m_trackTrails[t.id];
+        const QPointF mm(t.x, t.y);
+        // Skip exact duplicates: a zone-only update (e.g. "entered zone")
+        // reuses the last known position and would otherwise pad the path
+        // with a zero-length segment for every such event.
+        if (!pts.isEmpty() && pts.constLast().mm == mm) continue;
+        pts.append({now, mm});
     }
+    pruneTrail(now);
+}
+
+void RadarView::pruneTrail(qint64 now) {
+    for (auto it = m_trackTrails.begin(); it != m_trackTrails.end();) {
+        QVector<TrailPoint> &pts = it.value();
+        while (!pts.isEmpty() && (now - pts.constFirst().timestampMs) > kTrailMs) {
+            pts.removeFirst();
+        }
+        if (pts.isEmpty()) it = m_trackTrails.erase(it);
+        else ++it;
+    }
+}
+
+bool RadarView::isTrackStationary(int trackId, qint64 now) const {
+    const auto it = m_trackTrails.constFind(trackId);
+    if (it == m_trackTrails.constEnd()) return false;
+    const QVector<TrailPoint> &pts = it.value();
+    if (pts.isEmpty()) return false;
+
+    // Require the track to have existed for the full window already, so a
+    // brand-new track isn't dimmed before it's had a chance to move.
+    if (now - pts.constFirst().timestampMs < kStationaryWindowMs) return false;
+
+    double cx = 0, cy = 0;
+    int n = 0;
+    for (const TrailPoint &p : pts) {
+        if (now - p.timestampMs > kStationaryWindowMs) continue;
+        cx += p.mm.x();
+        cy += p.mm.y();
+        ++n;
+    }
+    if (n == 0) return false;
+    cx /= n;
+    cy /= n;
+
+    double maxDistSq = 0;
+    for (const TrailPoint &p : pts) {
+        if (now - p.timestampMs > kStationaryWindowMs) continue;
+        const double dx = p.mm.x() - cx;
+        const double dy = p.mm.y() - cy;
+        maxDistSq = std::max(maxDistSq, dx * dx + dy * dy);
+    }
+    return maxDistSq <= (kStationaryRadiusMm * kStationaryRadiusMm);
+}
+
+double RadarView::stationaryOpacityFactor(int trackId, qint64 now) const {
+    if (!m_dimStationary) return 1.0;
+    return isTrackStationary(trackId, now) ? kStationaryOpacity : 1.0;
 }
 
 bool RadarView::targetInFov(double, double screenY) const {
@@ -80,7 +127,10 @@ void RadarView::paintEvent(QPaintEvent *) {
     drawRings(painter, maxR);
     const double k = 1.0 / m_mmPerPx; // mm -> px
     drawZones(painter, k);
-    if (m_showTrail) drawTrail(painter, k);
+    if (m_showTrail) {
+        pruneTrail(m_clock.elapsed()); // let paths fade out even if tracks stop updating
+        drawTrail(painter, k);
+    }
     if (m_showTracks) drawTracks(painter, k);
     if (m_showTargets) drawTargets(painter, k);
 }
@@ -153,17 +203,20 @@ void RadarView::drawZones(QPainter &painter, double k) const {
 
 void RadarView::drawTrail(QPainter &painter, double k) const {
     const qint64 now = m_clock.elapsed();
-    for (int i = 1; i < m_trail.size(); ++i) {
-        const TrailFrame &prev = m_trail[i - 1];
-        const TrailFrame &curr = m_trail[i];
-        const int n = std::min(prev.pointsMm.size(), curr.pointsMm.size());
-        const double age = double(now - prev.timestampMs) / double(kTrailMs);
-        const int alpha = std::clamp(int(160 * (1.0 - age) + 20), 0, 160);
-        painter.setPen(QPen(QColor(0, 180, 255, alpha), 2));
+    // Each track ID owns its own path, so a segment only ever connects two
+    // positions that belonged to the same physical target over time.
+    for (auto it = m_trackTrails.cbegin(); it != m_trackTrails.cend(); ++it) {
+        const QVector<TrailPoint> &pts = it.value();
+        const double factor = stationaryOpacityFactor(it.key(), now);
+        for (int i = 1; i < pts.size(); ++i) {
+            const TrailPoint &prev = pts[i - 1];
+            const TrailPoint &curr = pts[i];
+            const double age = double(now - prev.timestampMs) / double(kTrailMs);
+            const int alpha = std::clamp(int((160 * (1.0 - age) + 20) * factor), 0, 160);
+            painter.setPen(QPen(QColor(0, 180, 255, alpha), 2));
 
-        for (int j = 0; j < n; ++j) {
-            const QPointF a(prev.pointsMm[j].x() * k, -prev.pointsMm[j].y() * k);
-            const QPointF b(curr.pointsMm[j].x() * k, -curr.pointsMm[j].y() * k);
+            const QPointF a(prev.mm.x() * k, -prev.mm.y() * k);
+            const QPointF b(curr.mm.x() * k, -curr.mm.y() * k);
             if (targetInFov(a.x(), a.y()) || targetInFov(b.x(), b.y())) {
                 painter.drawLine(a, b);
             }
@@ -173,44 +226,81 @@ void RadarView::drawTrail(QPainter &painter, double k) const {
 
 void RadarView::drawTargets(QPainter &painter, double k) const {
     painter.setFont(QFont(painter.font().family(), 9));
+    const qint64 now = m_clock.elapsed();
     const QVector<Target> targets = m_model->targets();
+    const QVector<Track> tracks = m_model->tracks();
+
     for (int i = 0; i < targets.size(); ++i) {
         const Target &t = targets[i];
         if (t.y == 0 && t.x == 0) continue;
         const QPointF p(t.x * k, -t.y * k);
         if (!targetInFov(p.x(), p.y())) continue;
 
+        // The raw "Targets: N" list carries no ID, so to decide whether
+        // *this* dot is likely the same stale reflection a nearby track is
+        // reporting, associate it with the closest known track by distance
+        // (same idea the firmware itself uses to keep track IDs stable).
+        double factor = 1.0;
+        bool stationary = false;
+        double bestDistSq = kTargetTrackAssociationMm * kTargetTrackAssociationMm;
+        int bestId = -1;
+        for (const Track &tr : tracks) {
+            if (!tr.hasPosition) continue;
+            const double dx = tr.x - t.x, dy = tr.y - t.y;
+            const double distSq = dx * dx + dy * dy;
+            if (distSq < bestDistSq) { bestDistSq = distSq; bestId = tr.id; }
+        }
+        if (bestId != -1) {
+            stationary = isTrackStationary(bestId, now);
+            factor = m_dimStationary && stationary ? kStationaryOpacity : 1.0;
+        }
+
         painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(0, 220, 255));
+        QColor dot(0, 220, 255);
+        dot.setAlphaF(factor);
+        painter.setBrush(dot);
         painter.drawEllipse(p, 5, 5);
 
-        const QString label = QStringLiteral("#%1 x:%2 y:%3 d:%4mm a:%5° s:%6cm/s")
-                                   .arg(i)
-                                   .arg(t.x)
-                                   .arg(t.y)
-                                   .arg(t.distance, 0, 'f', 0)
-                                   .arg(t.angle, 0, 'f', 1)
-                                   .arg(t.speed, 0, 'f', 1);
-        painter.setPen(QColor(220, 220, 220));
+        QString label = QStringLiteral("#%1 x:%2 y:%3 d:%4mm a:%5° s:%6cm/s")
+                             .arg(i)
+                             .arg(t.x)
+                             .arg(t.y)
+                             .arg(t.distance, 0, 'f', 0)
+                             .arg(t.angle, 0, 'f', 1)
+                             .arg(t.speed, 0, 'f', 1);
+        if (stationary && m_dimStationary) label += QStringLiteral(" (durağan?)");
+        QColor textColor(220, 220, 220);
+        textColor.setAlphaF(std::max(factor, 0.35)); // keep the "(durağan?)" hint legible
+        painter.setPen(textColor);
         painter.drawText(p + QPointF(8, -8), label);
     }
 }
 
 void RadarView::drawTracks(QPainter &painter, double k) const {
     painter.setFont(QFont(painter.font().family(), 9, QFont::Bold));
+    const qint64 now = m_clock.elapsed();
     for (const Track &t : m_model->tracks()) {
         if (!t.hasPosition) continue;
         const QPointF p(t.x * k, -t.y * k);
         if (!targetInFov(p.x(), p.y())) continue;
 
-        painter.setPen(QPen(QColor(255, 200, 0), 2));
+        const bool stationary = isTrackStationary(t.id, now);
+        const double factor = stationaryOpacityFactor(t.id, now);
+        QColor markerColor(255, 200, 0);
+        markerColor.setAlphaF(factor);
+
+        painter.setPen(QPen(markerColor, 2));
         painter.setBrush(Qt::NoBrush);
         const double s = 7;
         painter.drawLine(p + QPointF(-s, 0), p + QPointF(s, 0));
         painter.drawLine(p + QPointF(0, -s), p + QPointF(0, s));
 
         const QString zoneLabel = t.zone.isEmpty() ? QStringLiteral("-") : t.zone;
-        painter.setPen(QColor(255, 200, 0));
-        painter.drawText(p + QPointF(10, 12), QStringLiteral("T%1 [%2]").arg(t.id).arg(zoneLabel));
+        QString text = QStringLiteral("T%1 [%2]").arg(t.id).arg(zoneLabel);
+        if (stationary && m_dimStationary) text += QStringLiteral(" (durağan)");
+        QColor textColor(255, 200, 0);
+        textColor.setAlphaF(std::max(factor, 0.35));
+        painter.setPen(textColor);
+        painter.drawText(p + QPointF(10, 12), text);
     }
 }

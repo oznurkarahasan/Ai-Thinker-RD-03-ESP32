@@ -72,6 +72,14 @@ ControlPanel::ControlPanel(QWidget *parent) : QWidget(parent) {
     m_tracksCheck->setChecked(true);
     viewLayout->addRow(m_tracksCheck);
 
+    m_dimStationaryCheck = new QCheckBox(tr("Durağan/olası hayalet hedefleri soluklaştır"));
+    m_dimStationaryCheck->setChecked(true);
+    m_dimStationaryCheck->setToolTip(
+        tr("Birkaç saniyedir aynı noktada duran ve hızı ~0 olan hedefler genelde\n"
+           "gerçek bir insan değil, sabit bir yansımadır (clutter/ghost target).\n"
+           "Bunlar tamamen silinmez, sadece soluklaştırılıp '(durağan)' etiketiyle işaretlenir."));
+    viewLayout->addRow(m_dimStationaryCheck);
+
     root->addWidget(viewGroup);
 
     // ---- Device settings (sent as serial commands, echoed back by the firmware) ----
@@ -117,6 +125,7 @@ ControlPanel::ControlPanel(QWidget *parent) : QWidget(parent) {
     connect(m_targetsCheck, &QCheckBox::toggled, this, &ControlPanel::showTargetsChanged);
     connect(m_trailCheck, &QCheckBox::toggled, this, &ControlPanel::showTrailChanged);
     connect(m_tracksCheck, &QCheckBox::toggled, this, &ControlPanel::showTracksChanged);
+    connect(m_dimStationaryCheck, &QCheckBox::toggled, this, &ControlPanel::dimStationaryChanged);
 
     connect(zonesBtn, &QPushButton::clicked, this, [this] { emit commandRequested("ZONES"); });
     connect(helpBtn, &QPushButton::clicked, this, [this] { emit commandRequested("HELP"); });
@@ -189,6 +198,7 @@ void ControlPanel::setScaleValue(double mmPerPx) { m_scaleSpin->setValue(mmPerPx
 void ControlPanel::setShowTargetsChecked(bool show) { m_targetsCheck->setChecked(show); }
 void ControlPanel::setShowTrailChecked(bool show) { m_trailCheck->setChecked(show); }
 void ControlPanel::setShowTracksChecked(bool show) { m_tracksCheck->setChecked(show); }
+void ControlPanel::setDimStationaryChecked(bool dim) { m_dimStationaryCheck->setChecked(dim); }
 
 void ControlPanel::setDeviceSetting(const QString &key, TriState state) {
     m_deviceToggleStates[key] = state;

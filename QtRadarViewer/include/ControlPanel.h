@@ -33,6 +33,7 @@ public slots:
     void setShowTargetsChecked(bool show);
     void setShowTrailChecked(bool show);
     void setShowTracksChecked(bool show);
+    void setDimStationaryChecked(bool dim);
 
 signals:
     void connectRequested(const QString &portName, qint32 baudRate);
@@ -44,6 +45,7 @@ signals:
     void showTargetsChanged(bool show);
     void showTrailChanged(bool show);
     void showTracksChanged(bool show);
+    void dimStationaryChanged(bool dim);
 
 private:
     QCheckBox *makeDeviceToggle(const QString &label, const QString &command);
@@ -58,6 +60,7 @@ private:
     QCheckBox *m_targetsCheck;
     QCheckBox *m_trailCheck;
     QCheckBox *m_tracksCheck;
+    QCheckBox *m_dimStationaryCheck;
 
     QMap<QString, QCheckBox *> m_deviceToggleBoxes; // key: DEBUG/MULTI/EMA
     QMap<QString, TriState> m_deviceToggleStates;

@@ -110,6 +110,7 @@ void MainWindow::wireSignals() {
     connect(m_controlPanel, &ControlPanel::showTargetsChanged, m_radarView, &RadarView::setShowTargets);
     connect(m_controlPanel, &ControlPanel::showTrailChanged, m_radarView, &RadarView::setShowTrail);
     connect(m_controlPanel, &ControlPanel::showTracksChanged, m_radarView, &RadarView::setShowTracks);
+    connect(m_controlPanel, &ControlPanel::dimStationaryChanged, m_radarView, &RadarView::setDimStationary);
 
     // Persist view preferences as they change.
     connect(m_controlPanel, &ControlPanel::halfFovChanged, this, [this](bool v) { m_settings.setValue("view/halfFov", v); });
@@ -117,6 +118,7 @@ void MainWindow::wireSignals() {
     connect(m_controlPanel, &ControlPanel::showTargetsChanged, this, [this](bool v) { m_settings.setValue("view/targets", v); });
     connect(m_controlPanel, &ControlPanel::showTrailChanged, this, [this](bool v) { m_settings.setValue("view/trail", v); });
     connect(m_controlPanel, &ControlPanel::showTracksChanged, this, [this](bool v) { m_settings.setValue("view/tracks", v); });
+    connect(m_controlPanel, &ControlPanel::dimStationaryChanged, this, [this](bool v) { m_settings.setValue("view/dimStationary", v); });
 }
 
 void MainWindow::restoreSettings() {
@@ -131,6 +133,7 @@ void MainWindow::restoreSettings() {
     m_controlPanel->setShowTargetsChecked(m_settings.value("view/targets", false).toBool());
     m_controlPanel->setShowTrailChecked(m_settings.value("view/trail", true).toBool());
     m_controlPanel->setShowTracksChecked(m_settings.value("view/tracks", true).toBool());
+    m_controlPanel->setDimStationaryChecked(m_settings.value("view/dimStationary", true).toBool());
 }
 
 void MainWindow::saveSettings() {
